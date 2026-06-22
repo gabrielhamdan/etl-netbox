@@ -52,9 +52,7 @@ def main():
                 unidade u
             JOIN 
                 contato_unidade c ON u.id_unidade = c.id_unidade
-            WHERE 
-                u.unidade_sigla = 'embrapa-snt' 
-                AND c.nome IS NOT NULL;
+            WHERE c.nome IS NOT NULL;
         """
         cursor.execute(query)
         contatos_mysql = cursor.fetchall()
@@ -168,7 +166,8 @@ def main():
         if email_principal: dados_contato["email"] = email_principal
         if telefone_principal: dados_contato["phone"] = telefone_principal
 
-        contato = nb.tenancy.contacts.get(name=contato_name)
+        resultados = list(nb.tenancy.contacts.filter(name=contato_name))
+        contato = resultados[0] if resultados else None
         if not contato:
             try:
                 contato = nb.tenancy.contacts.create(**dados_contato)
