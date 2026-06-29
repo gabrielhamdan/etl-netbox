@@ -3,6 +3,7 @@ import mysql.connector
 import pynetbox
 import re
 import unicodedata
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -70,147 +71,152 @@ def main():
             conexao.close()
 
     # ==========================================
-    # 2. UPSERT: SITE (Alinhando Nome e Slug com a Sigla)
+    # 2. AGRUPAR POR UNIDADE
     # ==========================================
-    linha_base = contatos_mysql[0]
-    sigla_bruta = linha_base['unidade_sigla'].strip()
-    
-    # Para espelhar o caso da Emater, o Name deve ser a Sigla (ex: Embrapa-snt)
-    site_name_curto = sigla_bruta.capitalize()
-    site_slug_esperado = formatar_slug(sigla_bruta).lower()
-    
-    grupo_slug = site_slug_esperado.split('-')[0]
-    grupo_nome = grupo_slug.capitalize()
-
-    # Filtra usando o slug obrigatório
-    site = None
-    sites_candidatos = nb.dcim.sites.filter(slug__ic=site_slug_esperado) 
-    
-    if sites_candidatos:
-        for s in sites_candidatos:
-            if str(s.slug).lower().strip() == site_slug_esperado:
-                site = s
-                break
-
-    if not site:
-        grupo_obj = nb.dcim.site_groups.get(slug=grupo_slug)
-        if not grupo_obj:
-            grupo_obj = nb.dcim.site_groups.create(name=grupo_nome, slug=grupo_slug)
-
-        try:
-            # Enviando ambos os campos alinhados para forçar o log a registrar "Nome"
-            site = nb.dcim.sites.create(
-                name=site_name_curto,
-                slug=site_slug_esperado,
-                status='active',
-                group=grupo_obj.id,
-                description=linha_base['unidade_nome'].strip() # Salva o nome longo na descrição
-            )
-            print(f"🏗️ Novo Site '{site_name_curto}' criado com sucesso.")
-        except pynetbox.core.query.RequestError as e:
-            print(f"❌ Erro ao criar o Site: {e.error}")
-            return
-    else:
-        print(f"📍 Site '{site.name}' já existente.")
-
-    # ==========================================
-    # 3. UPSERT: CONTACTOS E CAMPOS PERSONALIZADOS
-    # ==========================================
-    print("\nIniciando processamento dos contactos...")
-    
+    contatos_por_unidade = defaultdict(list)
     for linha in contatos_mysql:
-        contato_name = linha['contato_nome'].strip()
-        print(f"\n👤 Processando: {contato_name}")
-        
-        email_bruto = str(linha.get('contato_email') or '').strip()
-        telefone_bruto = str(linha.get('contato_telefone') or '').strip()
+        chave = linha['unidade_sigla'].strip()
+        contatos_por_unidade[chave].append(linha)
 
-        lista_emails = [e.strip() for e in email_bruto.split(';') if e.strip()]
-        lista_telefones = [t.strip() for t in telefone_bruto.split(';') if t.strip()]
+    # ==========================================
+    # 3. ITERAR POR UNIDADE → SITE → CONTACTOS
+    # ==========================================
+    for sigla_bruta, contatos_da_unidade in contatos_por_unidade.items():
+        linha_base = contatos_da_unidade[0]
 
-        email_principal = ""
-        emails_restantes = []
-        for e in lista_emails:
-            if "@" in e and not email_principal:
-                email_principal = e
-            else:
-                emails_restantes.append(e)
+        site_name_curto = sigla_bruta.capitalize()
+        site_slug_esperado = formatar_slug(sigla_bruta).lower()
+        grupo_slug = site_slug_esperado.split('-')[0]
+        grupo_nome = grupo_slug.capitalize()
 
-        telefone_principal = ""
-        telefones_restantes = []
-        if lista_telefones:
-            telefone_principal = lista_telefones[0]
-            telefones_restantes = lista_telefones[1:]
+        print(f"\n{'='*50}")
+        print(f"🏢 Unidade: {sigla_bruta} ({linha_base['unidade_nome']})")
 
-        custom_fields = {}
-        if emails_restantes:
-            custom_fields['Email_Alternativo'] = "; ".join(emails_restantes)
-        if telefones_restantes:
-            custom_fields['Telefone_Alternativo'] = "; ".join(telefones_restantes)
+        # UPSERT: SITE
+        site = None
+        sites_candidatos = nb.dcim.sites.filter(slug__ic=site_slug_esperado)
 
-        responsabilidades = []
-        if linha.get('tecnico') == 1: responsabilidades.append('Técnico')
-        if linha.get('seguranca') == 1: responsabilidades.append('Segurança')
-        if linha.get('administrativo') == 1: responsabilidades.append('Administrativo')
+        if sites_candidatos:
+            for s in sites_candidatos:
+                if str(s.slug).lower().strip() == site_slug_esperado:
+                    site = s
+                    break
 
-        if responsabilidades:
-            custom_fields['funcao_de_contatos'] = responsabilidades
+        if not site:
+            grupo_obj = nb.dcim.site_groups.get(slug=grupo_slug)
+            if not grupo_obj:
+                grupo_obj = nb.dcim.site_groups.create(name=grupo_nome, slug=grupo_slug)
 
-        dados_contato = {
-            "name": contato_name
-        }
-        
-        if custom_fields:
-            dados_contato["custom_fields"] = custom_fields
-            
-        if email_principal: dados_contato["email"] = email_principal
-        if telefone_principal: dados_contato["phone"] = telefone_principal
-
-        resultados = list(nb.tenancy.contacts.filter(name=contato_name))
-        contato = resultados[0] if resultados else None
-        if not contato:
             try:
-                contato = nb.tenancy.contacts.create(**dados_contato)
-                print(f"   ➕ Contacto criado.")
+                site = nb.dcim.sites.create(
+                    name=site_name_curto,
+                    slug=site_slug_esperado,
+                    status='active',
+                    group=grupo_obj.id,
+                    description=linha_base['unidade_nome'].strip()
+                )
+                print(f"🏗️ Novo Site '{site_name_curto}' criado com sucesso.")
             except pynetbox.core.query.RequestError as e:
-                print(f"   ❌ Erro ao criar: {e.error}")
+                print(f"❌ Erro ao criar o Site: {e.error}")
                 continue
         else:
+            print(f"📍 Site '{site.name}' já existente.")
+
+        # UPSERT: CONTACTOS E CAMPOS PERSONALIZADOS
+        print("Iniciando processamento dos contactos...")
+
+        for linha in contatos_da_unidade:
+            contato_name = linha['contato_nome'].strip()
+            print(f"\n👤 Processando: {contato_name}")
+
+            email_bruto = str(linha.get('contato_email') or '').strip()
+            telefone_bruto = str(linha.get('contato_telefone') or '').strip()
+
+            lista_emails = [e.strip() for e in email_bruto.split(';') if e.strip()]
+            lista_telefones = [t.strip() for t in telefone_bruto.split(';') if t.strip()]
+
+            email_principal = ""
+            emails_restantes = []
+            for e in lista_emails:
+                if "@" in e and not email_principal:
+                    email_principal = e
+                else:
+                    emails_restantes.append(e)
+
+            telefone_principal = ""
+            telefones_restantes = []
+            if lista_telefones:
+                telefone_principal = lista_telefones[0]
+                telefones_restantes = lista_telefones[1:]
+
+            custom_fields = {}
+            if emails_restantes:
+                custom_fields['Email_Alternativo'] = "; ".join(emails_restantes)
+            if telefones_restantes:
+                custom_fields['Telefone_Alternativo'] = "; ".join(telefones_restantes)
+
+            responsabilidades = []
+            if linha.get('tecnico') == 1: responsabilidades.append('Técnico')
+            if linha.get('seguranca') == 1: responsabilidades.append('Segurança')
+            if linha.get('administrativo') == 1: responsabilidades.append('Administrativo')
+
+            if responsabilidades:
+                custom_fields['funcao_de_contatos'] = responsabilidades
+
+            dados_contato = {"name": contato_name}
+
+            if custom_fields:
+                dados_contato["custom_fields"] = custom_fields
+
+            if email_principal: dados_contato["email"] = email_principal
+            if telefone_principal: dados_contato["phone"] = telefone_principal
+
+            resultados = list(nb.tenancy.contacts.filter(name=contato_name))
+            contato = resultados[0] if resultados else None
+
+            if not contato:
+                try:
+                    contato = nb.tenancy.contacts.create(**dados_contato)
+                    print(f"   ➕ Contacto criado.")
+                except pynetbox.core.query.RequestError as e:
+                    print(f"   ❌ Erro ao criar: {e.error}")
+                    continue
+            else:
+                try:
+                    contato.update(dados_contato)
+                    print(f"   ✔️ Contacto atualizado.")
+                except pynetbox.core.query.RequestError as e:
+                    print(f"   ❌ Erro ao atualizar: {e.error}")
+
+            # LIGAÇÃO AO SITE
+            role_name_generica = "Colaborador da Unidade"
+            role_slug_generica = "colaborador-da-unidade"
+
+            role_obj = nb.tenancy.contact_roles.get(slug=role_slug_generica)
+            if not role_obj:
+                role_obj = nb.tenancy.contact_roles.create(name=role_name_generica, slug=role_slug_generica)
+
             try:
-                contato.update(dados_contato)
-                print(f"   ✔️ Contacto atualizado.")
-            except pynetbox.core.query.RequestError as e:
-                print(f"   ❌ Erro ao atualizar: {e.error}")
-
-        # --- LIGAÇÃO AO SITE ---
-        role_name_generica = "Colaborador da Unidade"
-        role_slug_generica = "colaborador-da-unidade"
-        
-        role_obj = nb.tenancy.contact_roles.get(slug=role_slug_generica)
-        if not role_obj:
-            role_obj = nb.tenancy.contact_roles.create(name=role_name_generica, slug=role_slug_generica)
-
-        try:
-            atribuicao_existente = nb.tenancy.contact_assignments.filter(
-                object_type='dcim.site',
-                object_id=site.id,
-                contact_id=contato.id,
-                role_id=role_obj.id
-            )
-
-            if not atribuicao_existente:
-                nb.tenancy.contact_assignments.create(
+                atribuicao_existente = nb.tenancy.contact_assignments.filter(
                     object_type='dcim.site',
                     object_id=site.id,
-                    contact=contato.id,
-                    role=role_obj.id
+                    contact_id=contato.id,
+                    role_id=role_obj.id
                 )
-                print(f"   🔗 Ligado ao site.")
-            else:
-                print(f"   ⚠️ Ligação já existia.")
-                
-        except pynetbox.core.query.RequestError as e:
-            print(f"   ❌ Erro ao criar ligação: {e.error}")
+
+                if not atribuicao_existente:
+                    nb.tenancy.contact_assignments.create(
+                        object_type='dcim.site',
+                        object_id=site.id,
+                        contact=contato.id,
+                        role=role_obj.id
+                    )
+                    print(f"   🔗 Ligado ao site '{site.name}'.")
+                else:
+                    print(f"   ⚠️ Ligação já existia.")
+
+            except pynetbox.core.query.RequestError as e:
+                print(f"   ❌ Erro ao criar ligação: {e.error}")
 
     print("\n🚀 FIM DO PROCESSO!")
 
